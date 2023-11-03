@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>File Upload to S3 with Case IDs</title>
+    <style>
+        /* Add some basic styling for the documents list container */
+        #documentsListContainer {
+            border: 2px solid #333;
+            /* Solid border for the documents list */
+            padding: 10px;
+            /* Some padding around the content */
+            margin-top: 20px;
+            /* Margin at the top for spacing */
+            background-color: rgba(255, 255, 255, 0.8);
+            /* White background with opacity for overlay effect */
+        }
+
+        .loading-bar-container {
+            display: none;
+            /* Initially hide the loading bar */
+            margin-top: 10px;
+            /* Margin at the top for spacing */
+            border: 1px solid #333;
+            /* Solid border for the loading bar container */
+            background-color: #f8f8f8;
+            /* Light grey background */
+        }
+
+        .loading-bar {
+            height: 20px;
+            /* Fixed height for the loading bar */
+            background-color: #4CAF50;
+            /* Green background for the loading bar itself */
+            width: 0%;
+            /* Initial width set to 0 */
+            transition: width 0.5s ease;
+            /* Smooth transition for the loading bar animation */
+        }
+
+        /* Style for individual document entries */
+        li {
+            border: 1px solid #ddd;
+            /* Light grey border for each document */
+            list-style-type: none;
+            /* No bullets for list items */
+            padding: 5px;
+            margin-top: 5px;
+        }
+
+        button {
+            margin-right: 5px;
+            /* Add space between buttons */
+        }
+    </style>
+    <script>
+
+        // Update the status message depending on the login state
+        function updateLoginStatus() {
+            const statusMessage = document.getElementById('statusMessage');
+            const authToken = sessionStorage.getItem('authToken');
+
+            if (authToken) {
+                statusMessage.textContent = 'You are logged in.';
+                statusMessage.style.color = 'green';
+                // Additional actions for a logged-in user
+            } else {
+                statusMessage.textContent = 'You are not logged in. Please log in to continue.';
+                statusMessage.style.color = 'red';
+                // Additional actions for a not-logged-in user
+            }
+        }
+
+        // Call updateLoginStatus when the page loads
+        window.onload = updateLoginStatus;
+
+        async function loginUser(event) {
+            event.preventDefault();
+
+            // Assuming your form fields have IDs 'username' and 'password'
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            // Other hardcoded parameters for your POST request
+            const postData = new URLSearchParams({
+                grant_type: 'password',
+                client_id: 'dev-oauth2-user',
+                client_secret: '12345678',
+                username: username,
+                password: password
+            });
+
+            try {
+                const response = await fetch('http://127.0.0.1:8080/auth/token', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: postData
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                // Assuming the token is in 'access_token' field of the response
+                sessionStorage.setItem('authToken', data.access_token);
+
+                // Update the login status message on the page
+                updateLoginStatus();
+
+                // You may also redirect the user or unlock further UI elements here
+
+            } catch (error) {
+                console.error('There has been a problem with your fetch operation:', error);
+
+                // If login fails, we should also update the status accordingly
+                updateLoginStatus();
+            }
+        }
+
+        function handleLogin(event) {
+            event.preventDefault(); // Prevent the default form submit
+
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            loginUser({ username, password }).then(token => {
+                // Enable upload functionality or redirect to upload page if needed
+                // Here you can show/hide or enable/disable upload buttons based on successful login
+            }).catch(error => {
+                console.error("Error during login:", error.message);
+                // Here you should handle login errors, show messages to the user, etc.
+            });
+        }
+
+        async function getUploadRequest(caseId, fileName) {
+            // Retrieve the auth token from session storage
+            const authToken = sessionStorage.getItem('authToken');
+
+            if (!authToken) {
+                throw new Error('User is not logged in.');
+            }
+
+            const response = await fetch(`http://localhost:8080/api/s3/${caseId}/upload-request`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${authToken}` // Include the auth token in the request
+                },
+                body: JSON.stringify({ fileName: fileName })
+            });
+
+            if (!response.ok) {
+                throw new Error('Network response was not ok: ' + response.statusText);
+            }
+
+            const data = await response.json(); // Parse the JSON response
+
+            return data;
+        }
+
+        async function uploadFile(file, presignedUrl) {
+            try {
+                const response = await fetch(presignedUrl, {
+                    method: 'PUT',
+                    body: file,
+                    headers: {
+                        'Content-Type': file.type // Use the file's MIME type
+                    }
+                });
+
+                if (response.ok) {
+                    console.log("File uploaded successfully.");
+                } else {
+                    console.error("Upload failed with HTTP status:", response.status);
+                }
+            } catch (error) {
+                console.error("Upload error:", error.message);
+            }
+        }
+
+        async function initiateUpload(caseId) {
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.onchange = async (e) => {
+                const file = e.target.files[0];
+                const fileNameDisplay = document.getElementById(`fileName-${caseId}`);
+                const loadingBarContainer = document.getElementById(`loadingBarContainer-${caseId}`);
+                const loadingBar = document.getElementById(`loadingBar-${caseId}`);
+
+                if (file) {
+                    fileNameDisplay.textContent = file.name; // Show the file name
+                    loadingBarContainer.style.display = 'block'; // Show the loading bar container
+                    loadingBar.style.width = '0%'; // Reset the loading bar width
+
+                    try {
+                        const uploadRequest = await getUploadRequest(caseId, file.name);
+                        console.log("get upload request: ", uploadRequest)
+
+                        console.log("get upload preSignedURL: ", uploadRequest.preSignedURL)
+                        console.log("get s3 ID: ", uploadRequest.s3ID)
+
+                        preSignedURL = uploadRequest.preSignedURL; // Extract the presigned URL from the JSON
+                        s3ID = uploadRequest.s3ID
+                        const xhr = new XMLHttpRequest();
+                        xhr.open('PUT', preSignedURL, true);
+
+                        xhr.upload.onprogress = function (e) {
+                            if (e.lengthComputable) {
+                                const percentComplete = (e.loaded / e.total) * 100;
+                                loadingBar.style.width = percentComplete + '%'; // Update loading bar width
+                            }
+                        };
+
+                        xhr.onload = function () {
+                            if (xhr.status === 200) {
+                                console.log('File uploaded successfully. Creating document in JAMS Access API');
+
+                                createDocument(caseId, file.name, s3ID)
+                                    .then(response => {
+                                        console.log('Document created:', response);
+                                        // Handle successful document creation
+                                    })
+                                    .catch(error => {
+                                        console.error('Error creating document:', error);
+                                        // Handle error in document creation
+                                    });
+
+                                loadingBarContainer.style.display = 'none'; // Hide loading bar container on success
+                                alert('File uploaded successfully.');
+                            } else {
+                                console.log('File upload failed. Response:', xhr.responseText); // Log the response even if it's a failure
+                            }
+                        };
+
+                        xhr.onerror = function () {
+                            console.error('Upload error:', xhr.status, xhr.statusText);
+                            alert('There was an error uploading the file.');
+                        };
+
+                        xhr.send(file);
+                    } catch (error) {
+                        console.error("Error during file upload:", error.message);
+                        loadingBarContainer.style.display = 'none'; // Hide loading bar container on error
+                    }
+                } else {
+                    console.log("No file selected.");
+                }
+            };
+            fileInput.click(); // Programmatically click the hidden file input
+        }
+
+        async function createDocument(caseId, fileName, s3Id) {
+            // Retrieve the auth token from session storage
+            const authToken = sessionStorage.getItem('authToken');
+
+            if (!authToken) {
+                throw new Error('User is not logged in.');
+            }
+
+            // Construct the s3FileKey
+            const s3FileKey = `${caseId}/${s3Id}/${fileName}`;
+
+            // Set up the request body
+            const requestBody = {
+                fileName: fileName,
+                caseId: caseId,
+                s3FileKey: s3FileKey,
+                documentType: "case doc",
+                onbaseId: s3FileKey,
+            };
+
+            // Perform the POST request to the create document API
+            const response = await fetch('http://127.0.0.1:8080/api/documents', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${authToken}` // Include the auth token in the request
+                },
+                body: JSON.stringify(requestBody)
+            });
+
+            if (!response.ok) {
+                throw new Error('Network response was not ok: ' + response.statusText);
+            }
+
+            // const data = await response.json(); // Parse the JSON response
+            return response; // The response from the create document API
+        }
+
+
+        async function getDocuments(caseId) {
+            // Retrieve the auth token from session storage
+            const authToken = sessionStorage.getItem('authToken');
+
+            if (!authToken) {
+                throw new Error('User is not logged in.');
+            }
+
+            // Perform the GET request to the API
+            const response = await fetch(`http://127.0.0.1:8080/api/documents/case/${caseId}?accessType=CASE`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${authToken}`
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Network response was not ok: ' + response.statusText);
+            }
+
+            const documents = await response.json(); // Parse the JSON response
+            console.log("fetched documents:", documents)
+            const documentList = extractDocuments(documents);
+
+            return documentList
+        }
+
+        function displayDocuments(documents) {
+            const documentsList = document.getElementById('documentsList'); // A container for the documents list in your HTML
+
+            // Clear any existing list items
+            documentsList.innerHTML = '';
+
+            // Iterate through the documents and create list items
+            documents.forEach(doc => {
+                // Create a list item for the document
+                const listItem = document.createElement('li');
+                listItem.textContent = doc.fileName; // Assuming 'fileName' is a property of the document object
+
+                // Create a download button for the document
+                const downloadButton = document.createElement('button');
+                downloadButton.textContent = 'Download';
+                // Assuming 'id' is a property of the document object to use as a download link
+                downloadButton.onclick = () => downloadDocument(doc.id);
+
+                // Append the button to the list item
+                listItem.appendChild(downloadButton);
+
+                // Append the list item to the documents list container
+                documentsList.appendChild(listItem);
+            });
+        }
+
+        function downloadDocument(documentId) {
+            // Retrieve the auth token from session storage
+            const authToken = sessionStorage.getItem('authToken');
+
+            if (!authToken) {
+                throw new Error('User is not logged in.');
+            }
+
+            // Assuming the endpoint for getting the presigned URL is `/api/documents/{documentId}/download`
+            const apiUrl = `http://127.0.0.1:8080/api/documents/${documentId}/download`;
+
+            // Set up the options for the fetch call, including the Authorization header
+            const fetchOptions = {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${authToken}`, // Add the access token as a Bearer token
+                    // Include any other headers your API requires
+                },
+            };
+
+            fetch(apiUrl, fetchOptions)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Error: ${response.statusText}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data && data.preSignedURL) {
+                        // Redirect to the presigned URL to start the download
+                        console.log("get s3 presigned url:", data.preSignedURL)
+
+                        window.location.href = data.preSignedURL;
+                    } else {
+                        throw new Error('Presigned URL not found in the response');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching presigned URL:', error);
+                    // Handle any errors that occurred during the fetch
+                });
+        }
+
+        // Function to fetch and display documents for a given case ID
+        async function getAndDisplayDocuments(caseId) {
+            try {
+                // Fetch documents using the API
+                const documents = await getDocuments(caseId); // Use the getDocuments function provided earlier
+                // Display the documents in the documents list container
+                displayDocuments(documents);
+            } catch (error) {
+                console.error("Error fetching documents:", error.message);
+            }
+        }
+
+
+        function extractDocuments(apiResponse) {
+            const documents = [];
+
+            if (apiResponse && apiResponse.items && Array.isArray(apiResponse.items)) {
+                apiResponse.items.forEach(item => {
+                    const document = {
+                        id: item.id,
+                        uploadedBy: item.uploadedBy,
+                        fileName: item.fileName,
+                        documentType: item.documentType,
+                        documentTypeId: item.documentTypeId,
+                        caseId: item.caseId,
+                        onbaseId: item.onbaseId,
+                        s3FileKey: item.s3FileKey,
+                        onbaseUserEmail: item.onbaseUserEmail,
+                        fileType: item.fileType,
+                        submitType: item.submitType,
+                        migrated: item.migrated,
+                        assignedToUser: item.assignedToUser,
+                        data: item.data,
+                        createdAt: item.createdAt,
+                        uploadedWhen: item.uploadedWhen,
+                        updatedAt: item.updatedAt,
+                        users: item.users,
+                        isFlagged: item.isFlagged,
+                        isViewed: item.isViewed,
+                    };
+                    documents.push(document);
+                });
+            }
+
+            return documents;
+        }
+
+    </script>
+</head>
+
+<body>
+    <h1>Login to Upload Files</h1>
+
+    <div id="statusMessage">Checking login status...</div>
+
+
+    <form id="loginForm" onsubmit="handleLogin(event)">
+        <div>
+            <label for="username">Email:</label>
+            <input type="email" id="username" required>
+        </div>
+        <div>
+            <label for="password">Password:</label>
+            <input type="password" id="password" required>
+        </div>
+        <div>
+            <button type="submit">Login</button>
+        </div>
+    </form>
+
+
+    <h1>Upload Files to S3 Based on Case IDs</h1>
+
+    <!-- Case ID upload and get documents buttons -->
+    <div>
+        <button onclick="initiateUpload(this.getAttribute('data-case-id'))" data-case-id="12345">Upload for Case
+            12345</button>
+        <button onclick="getAndDisplayDocuments(this.getAttribute('data-case-id'))" data-case-id="12345">Get Documents
+            for Case 12345</button>
+        <span id="fileName-12345"></span>
+        <div id="loadingBarContainer-12345" class="loading-bar-container">
+            <div id="loadingBar-12345" class="loading-bar"></div>
+        </div>
+    </div>
+    <div>
+        <button onclick="initiateUpload(this.getAttribute('data-case-id'))" data-case-id="67890">Upload for Case
+            67890</button>
+        <button onclick="getAndDisplayDocuments(this.getAttribute('data-case-id'))" data-case-id="67890">Get Documents
+            for Case 67890</button>
+        <span id="fileName-67890"></span>
+        <div id="loadingBarContainer-67890" class="loading-bar-container">
+            <div id="loadingBar-67890" class="loading-bar"></div>
+        </div>
+    </div>
+    <!-- Add more cases as needed -->
+
+
+    <!-- Div to list documents with added ID for styling -->
+    <div id="documentsListContainer">
+        <ul id="documentsList">
+            <!-- Documents will be listed here -->
+        </ul>
+    </div>
+
+
+</body>
+
+</html>
